@@ -2,20 +2,45 @@ import express, { Request, Response } from 'express';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
 
-dotenv.config();
+// Local only — Netlify injects env vars at deploy/runtime; loading .env there can confuse debugging.
+if (!process.env.NETLIFY) {
+  dotenv.config();
+}
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
-// Initialize Google GenAI with recommended telemetry User-Agent
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    },
-  },
-});
+function getGeminiApiKey(): string | undefined {
+  const key = process.env['GEMINI_API_KEY']?.trim();
+  return key || undefined;
+}
+
+function getElevenLabsApiKey(): string | undefined {
+  const key = process.env['ELEVENLABS_API_KEY']?.trim();
+  return key || undefined;
+}
+
+// Lazy init so a missing key fails with a clear message instead of ADC/credential errors.
+let aiClient: GoogleGenAI | null = null;
+function getAi(): GoogleGenAI {
+  const apiKey = getGeminiApiKey();
+  if (!apiKey) {
+    throw new Error(
+      'GEMINI_API_KEY is not available in this deploy. Set it in Netlify → Project configuration → Environment variables (Functions scope), then trigger a new production deploy.'
+    );
+  }
+  if (!aiClient) {
+    aiClient = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
+  }
+  return aiClient;
+}
 
 const THERAPIST_SYSTEM_PROMPT = `You are Mochi, a gentle, deeply compassionate bunny therapist and little listening friend.
 Your patient is Ashley. You are her dedicated personal therapist, and you know her well. Always address her directly and warmly by her name, "Ashley".
@@ -115,7 +140,7 @@ app.post('/api/chat/stream', async (req: Request, res: Response) => {
       parts: [{ text: userPromptWithContext }],
     });
 
-    const stream = await ai.models.generateContentStream({
+    const stream = await getAi().models.generateContentStream({
       model: 'gemini-3.1-flash-lite',
       contents,
       config: {
@@ -191,7 +216,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       parts: [{ text: userPromptWithContext }],
     });
 
-    const response = await ai.models.generateContent({
+    const response = await getAi().models.generateContent({
       model: 'gemini-3.1-flash-lite',
       contents,
       config: {
@@ -319,7 +344,7 @@ app.post('/api/transcribe', async (req: Request, res: Response) => {
       return;
     }
 
-    const response = await ai.models.generateContent({
+    const response = await getAi().models.generateContent({
       model: 'gemini-3.1-flash-lite',
       contents: [
         {
@@ -358,7 +383,7 @@ app.post('/api/transcribe', async (req: Request, res: Response) => {
 // GET /api/elevenlabs/voices - List account voices for ElevenLabs
 app.get('/api/elevenlabs/voices', async (_req: Request, res: Response) => {
   try {
-    const apiKey = process.env.ELEVENLABS_API_KEY;
+    const apiKey = getElevenLabsApiKey();
     if (!apiKey) {
       res.status(400).json({ error: 'ELEVENLABS_API_KEY is not configured' });
       return;
@@ -381,11 +406,19 @@ app.get('/api/elevenlabs/voices', async (_req: Request, res: Response) => {
 app.post('/api/tts/elevenlabs', async (req: Request, res: Response) => {
   try {
     const { text, voiceId = 'EXAVITQu4vr4xnSDxMaL', userApiKey } = req.body;
-    const apiKey = userApiKey || process.env.ELEVENLABS_API_KEY;
+    const apiKey = (typeof userApiKey === 'string' && userApiKey.trim()) || getElevenLabsApiKey();
 
     if (!apiKey) {
       res.status(400).json({
         error: 'No ElevenLabs API key provided. Please configure ELEVENLABS_API_KEY.',
+      });
+      return;
+    }
+
+    if (!String(apiKey).startsWith('sk_')) {
+      res.status(400).json({
+        error:
+          "ELEVENLABS_API_KEY looks invalid. Use the secret key that starts with 'sk_' (not the key ID).",
       });
       return;
     }
@@ -454,9 +487,14 @@ app.post('/api/tts/elevenlabs', async (req: Request, res: Response) => {
 
 // Health check endpoint
 app.get('/api/health', (_req: Request, res: Response) => {
+  const geminiKey = getGeminiApiKey();
+  const elevenLabsKey = getElevenLabsApiKey();
   res.json({
     status: 'ok',
-    geminiKeyConfigured: Boolean(process.env.GEMINI_API_KEY),
+    geminiKeyConfigured: Boolean(geminiKey),
+    elevenLabsKeyConfigured: Boolean(elevenLabsKey),
+    elevenLabsKeyLooksValid: Boolean(elevenLabsKey?.startsWith('sk_')),
+    site: process.env['URL'] || process.env['DEPLOY_PRIME_URL'] || null,
     time: new Date().toISOString(),
   });
 });
