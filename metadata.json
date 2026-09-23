@@ -1,0 +1,10 @@
+{
+  "name": "BunnyMind - AI Voice Therapist",
+  "description": "A calming real-time AI therapist featuring an expressive animated SVG bunny avatar with lip-sync, speech-to-text, and empathetic voice guidance.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
