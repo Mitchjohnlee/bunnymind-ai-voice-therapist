@@ -42,6 +42,72 @@ function getAi(): GoogleGenAI {
   return aiClient;
 }
 
+const GEMINI_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-2.0-flash',
+  'gemini-3.1-flash-lite',
+] as const;
+
+function isModelUnavailableError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return (
+    message.includes('"code":503') ||
+    message.includes('UNAVAILABLE') ||
+    message.includes('high demand') ||
+    message.includes('not found') ||
+    message.includes('NOT_FOUND')
+  );
+}
+
+async function generateTherapistContent(contents: Array<{ role: 'user' | 'model'; parts: unknown[] }>) {
+  const ai = getAi();
+  let lastError: unknown;
+  for (const model of GEMINI_MODELS) {
+    try {
+      return await ai.models.generateContent({
+        model,
+        contents: contents as never,
+        config: {
+          systemInstruction: THERAPIST_SYSTEM_PROMPT,
+          temperature: 0.7,
+        },
+      });
+    } catch (error) {
+      lastError = error;
+      if (!isModelUnavailableError(error)) {
+        throw error;
+      }
+      console.warn(`Gemini model ${model} unavailable, trying next fallback...`);
+    }
+  }
+  throw lastError;
+}
+
+async function generateTherapistContentStream(contents: Array<{ role: 'user' | 'model'; parts: unknown[] }>) {
+  const ai = getAi();
+  let lastError: unknown;
+  for (const model of GEMINI_MODELS) {
+    try {
+      return await ai.models.generateContentStream({
+        model,
+        contents: contents as never,
+        config: {
+          systemInstruction: THERAPIST_SYSTEM_PROMPT,
+          temperature: 0.7,
+        },
+      });
+    } catch (error) {
+      lastError = error;
+      if (!isModelUnavailableError(error)) {
+        throw error;
+      }
+      console.warn(`Gemini stream model ${model} unavailable, trying next fallback...`);
+    }
+  }
+  throw lastError;
+}
+
 const THERAPIST_SYSTEM_PROMPT = `You are Mochi, a gentle, deeply compassionate bunny therapist and little listening friend.
 Your patient is Ashley. You are her dedicated personal therapist, and you know her well. Always address her directly and warmly by her name, "Ashley".
 
@@ -140,14 +206,7 @@ app.post('/api/chat/stream', async (req: Request, res: Response) => {
       parts: [{ text: userPromptWithContext }],
     });
 
-    const stream = await getAi().models.generateContentStream({
-      model: 'gemini-3.1-flash-lite',
-      contents,
-      config: {
-        systemInstruction: THERAPIST_SYSTEM_PROMPT,
-        temperature: 0.7,
-      },
-    });
+    const stream = await generateTherapistContentStream(contents);
 
     let buffer = '';
     let sentenceIndex = 0;
@@ -216,14 +275,7 @@ app.post('/api/chat', async (req: Request, res: Response) => {
       parts: [{ text: userPromptWithContext }],
     });
 
-    const response = await getAi().models.generateContent({
-      model: 'gemini-3.1-flash-lite',
-      contents,
-      config: {
-        systemInstruction: THERAPIST_SYSTEM_PROMPT,
-        temperature: 0.7,
-      },
-    });
+    const response = await generateTherapistContent(contents);
 
     const replyText = response.text?.trim() || "Hello Ashley... Snuffle... I am right here listening closely. Take a slow breath, and tell me what you're feeling.";
 
@@ -344,25 +396,42 @@ app.post('/api/transcribe', async (req: Request, res: Response) => {
       return;
     }
 
-    const response = await getAi().models.generateContent({
-      model: 'gemini-3.1-flash-lite',
-      contents: [
-        {
-          role: 'user',
-          parts: [
+    let response;
+    let lastError: unknown;
+    for (const model of GEMINI_MODELS) {
+      try {
+        response = await getAi().models.generateContent({
+          model,
+          contents: [
             {
-              inlineData: {
-                mimeType: cleanMime,
-                data: cleanBase64,
-              },
-            },
-            {
-              text: 'Transcribe the spoken audio verbatim in standard English. Only return the exact spoken words with no preamble, commentary, or markdown. If the audio contains silence, ambient background static, or unintelligible noise, respond with an empty string.',
+              role: 'user',
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: cleanMime,
+                    data: cleanBase64,
+                  },
+                },
+                {
+                  text: 'Transcribe the spoken audio verbatim in standard English. Only return the exact spoken words with no preamble, commentary, or markdown. If the audio contains silence, ambient background static, or unintelligible noise, respond with an empty string.',
+                },
+              ],
             },
           ],
-        },
-      ],
-    });
+        });
+        lastError = undefined;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (!isModelUnavailableError(error)) {
+          throw error;
+        }
+        console.warn(`Gemini transcribe model ${model} unavailable, trying next fallback...`);
+      }
+    }
+    if (!response) {
+      throw lastError;
+    }
 
     let transcript = response.text?.trim() || '';
     if (
